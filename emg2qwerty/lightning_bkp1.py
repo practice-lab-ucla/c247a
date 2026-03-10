@@ -18,7 +18,7 @@ from torch import nn
 from torch.utils.data import ConcatDataset, DataLoader
 from torchmetrics import MetricCollection
 
-# from emg2qwerty.transformer_encoder import TransformerEncoderModule
+from emg2qwerty.transformer_encoder import TransformerEncoderModule
 from emg2qwerty import utils
 from emg2qwerty.charset import charset
 from emg2qwerty.data import LabelData, WindowedEMGDataset
@@ -26,27 +26,9 @@ from emg2qwerty.metrics import CharacterErrorRates
 from emg2qwerty.modules import (
     MultiBandRotationInvariantMLP,
     SpectrogramNorm,
-    TransformerEncoder,
-    TDSConvEncoder
+    TDSConvEncoder,
 )
 from emg2qwerty.transforms import Transform
-
-
-
-# add near imports in lightning.py
-from torch import nn
-
-class IdentityWithLengths(nn.Module):
-    """Identity module that accepts the same call signature as the Transformer.
-    This avoids changing call-sites while doing ablation tests.
-    """
-    def __init__(self):
-        super().__init__()
-
-    def forward(self, x: torch.Tensor, input_lengths: torch.Tensor | None = None) -> torch.Tensor:
-        # ignore input_lengths but keep the same API
-        return x
-
 
 
 class WindowedEMGDataModule(pl.LightningDataModule):
@@ -78,7 +60,6 @@ class WindowedEMGDataModule(pl.LightningDataModule):
         self.train_transform = train_transform
         self.val_transform = val_transform
         self.test_transform = test_transform
-
 
     def setup(self, stage: str | None = None) -> None:
         self.train_dataset = ConcatDataset(
@@ -171,7 +152,7 @@ class TDSConvCTCModule(pl.LightningModule):
         optimizer: DictConfig,
         lr_scheduler: DictConfig,
         decoder: DictConfig,
-        # transformer: DictConfig,
+        transformer: DictConfig,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
@@ -179,87 +160,69 @@ class TDSConvCTCModule(pl.LightningModule):
         num_features = self.NUM_BANDS * mlp_features[-1]
 
 
-        # ---------- TDS conv encoder (inserted between frontend and transformer) ----------
-        # instantiate TDS conv encoder using provided block_channels and kernel_width args
-        # block_channels and kernel_width are passed into __init__ already
-        self.tds_encoder = TDSConvEncoder(
-            num_features=num_features,
-            block_channels=block_channels,
-            kernel_width=kernel_width,
-        )
-
-        # compute how many conv-blocks are applied so we can compute temporal reduction
-        # Each TDSConv2dBlock uses a Conv over time with kernel_size=kernel_width and no padding,
-        # which reduces length by (kernel_width - 1) per block. TDSConvEncoder stacks len(block_channels) blocks.
-        self.tds_num_blocks = len(block_channels)
-        self.tds_time_reduction = self.tds_num_blocks * (kernel_width - 1)
-        # ---------------------------------------------------------------------------------
-
-
-        # ---------------- downsampler config (hardcoded) ----------------
-        # Hardcode the downsampling behaviour here (no Hydra / YAML)
-        self.downsample = True                  # set False to disable downsampling entirely
-        self.downsample_kernel = 3              # kernel size for Conv1d (set 1 for no receptive-field change)
-        self.downsample_stride = 2              # stride >1 downsamples, stride=1 preserves temporal length
-        self.downsample_padding = 1             # padding for Conv1d
-
-        if self.downsample:
-            # Conv1d uses shape (N, channels, T) so channels=num_features
-            self.time_downsampler = nn.Conv1d(
-                in_channels=num_features,
-                out_channels=num_features,
-                kernel_size=self.downsample_kernel,
-                stride=self.downsample_stride,
-                padding=self.downsample_padding,
-            )
-        else:
-            # keep attribute for code simplicity, but set to None
-            self.time_downsampler = None
-        # ----------------------------------------------------------------
 
 
 
+        transformer_cfg = OmegaConf.to_container(transformer, resolve=True)
+        encoder_module = TransformerEncoderModule(**transformer_cfg)
 
-
-        # ---------- frontend that prepares (T, N, num_features) ----------
-        # inputs: (T, N, bands=2, electrode_channels=16, freq)
-        self.frontend = nn.Sequential(
-            SpectrogramNorm(channels=self.NUM_BANDS * self.ELECTRODE_CHANNELS),  # (T, N, bands=2, C=16, freq)
+        self.model = nn.Sequential(
+            # (T, N, bands=2, C=16, freq)
+            SpectrogramNorm(channels=self.NUM_BANDS * self.ELECTRODE_CHANNELS),
+            # (T, N, bands=2, mlp_features[-1])
             MultiBandRotationInvariantMLP(
                 in_features=in_features,
                 mlp_features=mlp_features,
                 num_bands=self.NUM_BANDS,
-            ),  # -> (T, N, num_bands, mlp_features[-1])
-            nn.Flatten(start_dim=2),  # -> (T, N, num_features)
-        )
-
-        # ---------- Transformer encoder ----------
-        # self.encoder = TransformerEncoder(
-        #     d_model=num_features,      # keep embedding dim equal to num_features
-        #     nhead=8,                  # tune (must divide d_model)
-        #     num_layers=3,             # tune: 2-6 recommended
-        #     dim_feedforward=2048,     # tune
-        #     dropout=0.1,
-        #     max_len=20000,
-        # )
-
-        self.encoder = TransformerEncoder(
-            d_model=num_features,      # keep embedding dim equal to num_features
-            nhead=4,                  # tune (must divide d_model)
-            num_layers=2,             # tune: 2-6 recommended
-            dim_feedforward=1024,     # tune
-            dropout=0.1,
-            max_len=20000,
-        )
-        # temporary ablation: bypass transformer
-
-        # self.encoder = IdentityWithLengths()
-
-        # ---------- head that maps (T, N, num_features) -> (T, N, num_classes) ----------
-        self.head = nn.Sequential(
+            ),
+            # (T, N, num_features)
+            nn.Flatten(start_dim=2),
+            # Transformer encoder built from YAML config
+            encoder_module,
+            # (T, N, num_classes)
             nn.Linear(num_features, charset().num_classes),
             nn.LogSoftmax(dim=-1),
         )
+
+
+
+
+        # self.model = nn.Sequential(
+        #     # (T, N, bands=2, C=16, freq)
+        #     SpectrogramNorm(channels=self.NUM_BANDS * self.ELECTRODE_CHANNELS),
+        #     # (T, N, bands=2, mlp_features[-1])
+        #     MultiBandRotationInvariantMLP(
+        #         in_features=in_features,
+        #         mlp_features=mlp_features,
+        #         num_bands=self.NUM_BANDS,
+        #     ),
+        #     # (T, N, num_features)
+        #     nn.Flatten(start_dim=2),
+        #     TDSConvEncoder(
+        #         num_features=num_features,
+        #         block_channels=block_channels,
+        #         kernel_width=kernel_width,
+        #     ),
+        #     # (T, N, num_classes)
+        #     nn.Linear(num_features, charset().num_classes),
+        #     nn.LogSoftmax(dim=-1),
+        # )
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -279,49 +242,33 @@ class TDSConvCTCModule(pl.LightningModule):
             }
         )
 
-    def forward(self, inputs: torch.Tensor, input_lengths: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor | None]:
-        # frontend -> (T, N, num_features)
-        x = self.frontend(inputs)  # (T, N, E) where E == num_features
+    # def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+    #     return self.model(inputs)
 
-        # -------- apply TDS conv encoder (may reduce temporal length) ----------
-        # TDSConvEncoder expects (T, N, num_features) and returns (T_tds, N, num_features)
-        x = self.tds_encoder(x)
-        # ----------------------------------------------------------------------
 
-        emission_lengths = None
-        if input_lengths is not None:
-            # First, account for TDS conv temporal shrinkage:
-            tds_reduction = getattr(self, "tds_time_reduction", 0)
-            tds_out_lengths = (input_lengths - tds_reduction).clamp(min=1)
-
-            if self.downsample and self.time_downsampler is not None:
-                k = self.downsample_kernel
-                p = self.downsample_padding
-                s = self.downsample_stride
-                emission_lengths = ((tds_out_lengths + 2 * p - (k - 1) - 1) // s) + 1
-                emission_lengths = emission_lengths.clamp(min=1).to(device=input_lengths.device).long()
-            else:
-                emission_lengths = tds_out_lengths.to(device=inputs.device).long()
-
-        # optionally downsample in time (Conv1d) — same as before
-        if self.downsample and self.time_downsampler is not None:
-            # (T_tds, N, E) -> (N, E, T_tds) -> Conv1d -> (N, E, T_out) -> (T_out, N, E)
-            x = x.permute(1, 2, 0)                 # (N, E, T)
-            x = self.time_downsampler(x)           # (N, E, T_out)
-            x = x.permute(2, 0, 1)                 # (T_out, N, E)
-        else:
-            # keep as (T_tds, N, E)
-            pass
-
-        # Pass through transformer encoder: pass emission_lengths (may equal input_lengths if not downsampling)
-        x = self.encoder(x, input_lengths=emission_lengths)  # (T_out, N, E) or (T_tds, N, E)
-
-        # Classification head -> (T_out_or_T_tds, N, num_classes)
-        emissions = self.head(x)  # (T_out, N, num_classes)
-        # after emissions = self.head(x)
-        if emission_lengths is not None:
-            assert emissions.shape[0] >= int(emission_lengths.max()), "emissions shorter than emission_lengths"
-        return emissions, emission_lengths
+    def forward(self, x: torch.Tensor, padding_mask: torch.Tensor = None) -> torch.Tensor:
+        """
+        x: (T, N, bands, channels, freq)
+        padding_mask: (N, T) boolean mask
+        """
+        # 1. SpectrogramNorm (first element of self.model)
+        x = self.model[0](x)
+        
+        # 2. MultiBandRotationInvariantMLP (second element)
+        x = self.model[1](x)
+        
+        # 3. Flatten (third element)
+        x = self.model[2](x)
+        
+        # 4. TransformerEncoderModule (fourth element)
+        # Pass the mask here!
+        x = self.model[3](x, src_key_padding_mask=padding_mask)
+        
+        # 5. Final Linear and LogSoftmax (fifth and sixth elements)
+        x = self.model[4](x)
+        x = self.model[5](x)
+        
+        return x
 
 
     def _step(
@@ -338,32 +285,32 @@ class TDSConvCTCModule(pl.LightningModule):
 
         # --- NEW: Generate the initial padding mask ---
         # T is the first dim, N is the second
-        # T_max, N = inputs.shape[0], inputs.shape[1]
-        # device = inputs.device
-        # # Create mask: True for padding (where index >= length)
-        # ids = torch.arange(T_max, device=device).unsqueeze(0) # (1, T)
-        # src_key_padding_mask = ids >= input_lengths.unsqueeze(1) # (N, T)
+        T_max, N = inputs.shape[0], inputs.shape[1]
+        device = inputs.device
+        # Create mask: True for padding (where index >= length)
+        ids = torch.arange(T_max, device=device).unsqueeze(0) # (1, T)
+        src_key_padding_mask = ids >= input_lengths.unsqueeze(1) # (N, T)
+
+        emissions = self.forward(inputs, padding_mask=src_key_padding_mask)
+
+
+
 
         
-        # inside _step()
-        emissions, emission_lengths = self.forward(inputs, input_lengths=input_lengths)
+        # emissions = self.forward(inputs)
 
-        # Ensure emission_lengths exists and on same device
-        if emission_lengths is None:
-            emission_lengths = torch.full((N,), emissions.shape[0], dtype=torch.long, device=inputs.device)
-        else:
-            emission_lengths = emission_lengths.to(inputs.device)
-
-        # Sanity check
-        assert emissions.shape[0] >= int(emission_lengths.max()), (
-            f"Emissions time dim {emissions.shape[0]} < max emission length {int(emission_lengths.max())}"
-        )
+        # Shrink input lengths by an amount equivalent to the conv encoder's
+        # temporal receptive field to compute output activation lengths for CTCLoss.
+        # NOTE: This assumes the encoder doesn't perform any temporal downsampling
+        # such as by striding.
+        T_diff = inputs.shape[0] - emissions.shape[0]
+        emission_lengths = input_lengths - T_diff
 
         loss = self.ctc_loss(
-            log_probs=emissions,                         # (T_out, N, num_classes)
-            targets=targets.transpose(0, 1),             # (N, T_targets)
-            input_lengths=emission_lengths,              # (N,)
-            target_lengths=target_lengths,               # (N,)
+            log_probs=emissions,  # (T, N, num_classes)
+            targets=targets.transpose(0, 1),  # (T, N) -> (N, T)
+            input_lengths=emission_lengths,  # (N,)
+            target_lengths=target_lengths,  # (N,)
         )
 
         # Decode emissions

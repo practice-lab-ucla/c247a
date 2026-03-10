@@ -280,31 +280,8 @@ class TDSConvEncoder(nn.Module):
         return self.tds_conv_blocks(inputs)  # (T, N, num_features)
 
 # ---------------------- Transformer encoder (append to modules.py) ----------------------
-# class PositionalEncoding(nn.Module):
-#     """Sinusoidal positional encoding returning (seq_len, 1, d_model) to broadcast over batch."""
-#     def __init__(self, d_model: int, max_len: int = 20000) -> None:
-#         super().__init__()
-#         pe = torch.zeros(max_len, d_model)
-#         position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-#         div_term = torch.exp(
-#             torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model)
-#         )
-#         pe[:, 0::2] = torch.sin(position * div_term)
-#         pe[:, 1::2] = torch.cos(position * div_term)
-#         # pe shape: (max_len, d_model)
-#         self.register_buffer("pe", pe)  # non-trainable buffer
-
-#     def forward(self, seq_len: int) -> torch.Tensor:
-#         # returns (seq_len, 1, d_model) so it broadcasts over batch dim
-#         return self.pe[:seq_len].unsqueeze(1)
-
 class PositionalEncoding(nn.Module):
-    """Sinusoidal positional encoding returning (seq_len, 1, d_model) to broadcast over batch.
-
-    - The initial `pe` buffer is registered at construction with size `max_len`.
-    - If a larger seq_len is requested, a larger encoding is generated on-the-fly
-      and cached on CPU as `self._cached_pe_cpu` to avoid repeated recomputation.
-    """
+    """Sinusoidal positional encoding returning (seq_len, 1, d_model) to broadcast over batch."""
     def __init__(self, d_model: int, max_len: int = 20000) -> None:
         super().__init__()
         pe = torch.zeros(max_len, d_model)
@@ -315,49 +292,12 @@ class PositionalEncoding(nn.Module):
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
         # pe shape: (max_len, d_model)
-        # register as a buffer (non-trainable)
-        self.register_buffer("pe", pe)  # stored on module device (usually CPU until .to())
-        # track the maximum cached length (initially max_len)
-        self._cached_max_len = max_len
-        # optional CPU cache for dynamically generated larger pos encodings
-        self._cached_pe_cpu = None  # type: Optional[torch.Tensor]
+        self.register_buffer("pe", pe)  # non-trainable buffer
 
     def forward(self, seq_len: int) -> torch.Tensor:
-        """
-        Returns shape (seq_len, 1, d_model).
-        - If seq_len <= _cached_max_len, slice the registered buffer.
-        - Otherwise build a new positional encoding of length seq_len and cache it on CPU.
-        Note: caller should .to(device, dtype) the result to match inputs.
-        """
-        if seq_len <= self._cached_max_len:
-            # slice from registered buffer (safe)
-            return self.pe[:seq_len].unsqueeze(1)  # (seq_len, 1, d_model)
+        # returns (seq_len, 1, d_model) so it broadcasts over batch dim
+        return self.pe[:seq_len].unsqueeze(1)
 
-        # Need to construct a longer encoding. Prefer cached CPU copy if present and long enough
-        if self._cached_pe_cpu is not None and self._cached_pe_cpu.size(0) >= seq_len:
-            return self._cached_pe_cpu[:seq_len].unsqueeze(1)
-
-        # Build on CPU (to avoid large GPU allocations) using same dtype as buffer
-        device = self.pe.device  # typically CPU
-        dtype = self.pe.dtype
-        position = torch.arange(0, seq_len, dtype=dtype, device=device).unsqueeze(1)  # (seq_len,1)
-        d_model = self.pe.shape[1]
-        div_term = torch.exp(
-            torch.arange(0, d_model, 2, device=device, dtype=dtype) * (-(math.log(10000.0) / d_model))
-        )
-        pe = torch.zeros(seq_len, d_model, device=device, dtype=dtype)
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-
-        # Cache a CPU copy to reuse later (safe and avoids repeated building)
-        try:
-            self._cached_pe_cpu = pe.cpu().detach()
-            self._cached_max_len = seq_len
-        except Exception:
-            # If caching fails, just return the generated tensor for this call
-            self._cached_pe_cpu = None
-
-        return pe.unsqueeze(1)  # (seq_len, 1, d_model)
 
 class TransformerEncoder(nn.Module):
     """
@@ -396,44 +336,20 @@ class TransformerEncoder(nn.Module):
         returns: (T, N, E)
         """
         T, N, E = inputs.shape
+        if E != self.pos_enc.pe.shape[1]:
+            # pos_enc.pe may be larger than d_model; still OK. Just ensure dims consistent:
+            pass
 
-        # Retrieve positional encodings and move to same device/dtype as inputs
-        pos = self.pos_enc(T).to(device=inputs.device, dtype=inputs.dtype)  # (T,1,d_model)
+        # add positional encoding: (T,1,E) -> broadcast to (T,N,E)
+        pos = self.pos_enc(T).to(inputs.device)  # (T,1,E)
+        x = inputs + pos  # (T,N,E)
 
-        # sanity: ensure embedding dims match
-        if pos.shape[2] != E:
-            raise RuntimeError(
-                f"Transformer embedding dimension mismatch: inputs E={E}, pos d_model={pos.shape[2]}. "
-                "Check that d_model passed to TransformerEncoder equals input embedding size."
-            )
-
-        # Quick safety warning for huge sequences (user-visible; not fatal)
-        # Very large T can cause OOMs due to O(T^2) attention; prefer subsampling/windowing.
-        if T > 10000:
-            # use logging if available; fallback to print
-            try:
-                import logging
-                logging.getLogger(__name__).warning(
-                    f"Large sequence length T={T} entering attention. This may OOM or be very slow. "
-                    "Consider downsampling or chunking the input."
-                )
-            except Exception:
-                print(
-                    f"WARNING: Large sequence length T={T} entering attention. "
-                    "Consider downsampling or chunking the input."
-                )
-
-        # Add positional encoding (broadcasts over batch)
-        x = inputs + pos  # (T, N, E)
-
-        # Build src_key_padding_mask: shape (N, T) with True == PAD
+        # src_key_padding_mask: (N, T) True=PAD
         src_key_padding_mask = None
         if input_lengths is not None:
-            if input_lengths.device != inputs.device:
-                input_lengths = input_lengths.to(device=inputs.device)
             arange = torch.arange(T, device=inputs.device).unsqueeze(0)  # (1, T)
             src_key_padding_mask = arange >= input_lengths.unsqueeze(1)  # (N, T) bool
 
-        out = self.encoder(x, src_key_padding_mask=src_key_padding_mask)  # (T, N, E)
+        out = self.encoder(x, src_key_padding_mask=src_key_padding_mask)  # (T,N,E)
         return out
 # ----------------------------------------------------------------------------------------
