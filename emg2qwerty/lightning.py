@@ -9,13 +9,14 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, ClassVar
 
+import math
 import numpy as np
 import pytorch_lightning as pl
 import torch
 from hydra.utils import instantiate
 from omegaconf import DictConfig
 from torch import nn
-from torch.utils.data import ConcatDataset, DataLoader
+from torch.utils.data import ConcatDataset, DataLoader, Subset
 from torchmetrics import MetricCollection
 
 # from emg2qwerty.transformer_encoder import TransformerEncoderModule
@@ -62,6 +63,8 @@ class WindowedEMGDataModule(pl.LightningDataModule):
         train_transform: Transform[np.ndarray, torch.Tensor],
         val_transform: Transform[np.ndarray, torch.Tensor],
         test_transform: Transform[np.ndarray, torch.Tensor],
+        train_fraction: float = 1,
+        train_seed: int = 26, 
     ) -> None:
         super().__init__()
 
@@ -80,8 +83,14 @@ class WindowedEMGDataModule(pl.LightningDataModule):
         self.test_transform = test_transform
 
 
+        self.train_fraction = float(train_fraction)
+        assert 0.0 < self.train_fraction <= 1.0, "train_fraction must be in (0.0, 1.0]"
+        self.train_seed = int(train_seed)
+
+
     def setup(self, stage: str | None = None) -> None:
-        self.train_dataset = ConcatDataset(
+        # build full train ConcatDataset (like you already do)
+        full_train_dataset = ConcatDataset(
             [
                 WindowedEMGDataset(
                     hdf5_path,
@@ -93,6 +102,21 @@ class WindowedEMGDataModule(pl.LightningDataModule):
                 for hdf5_path in self.train_sessions
             ]
         )
+
+        # If fraction == 1.0, keep full dataset; otherwise sample windows across the concatenated dataset.
+        if self.train_fraction >= 1.0 or math.isclose(self.train_fraction, 1.0):
+            self.train_dataset = full_train_dataset
+        else:
+            # reproducible random sampling of indices
+            total = len(full_train_dataset)
+            k = max(1, int(total * self.train_fraction))
+            rng = torch.Generator()
+            rng.manual_seed(self.train_seed)
+            perm = torch.randperm(total, generator=rng)
+            selected_idx = perm[:k].tolist()
+            self.train_dataset = Subset(full_train_dataset, selected_idx)
+
+        # val and test unchanged (you can keep your current behavior)
         self.val_dataset = ConcatDataset(
             [
                 WindowedEMGDataset(
@@ -172,6 +196,10 @@ class TDSConvCTCModule(pl.LightningModule):
         lr_scheduler: DictConfig,
         decoder: DictConfig,
         # transformer: DictConfig,
+
+        use_tds: bool = False, 
+
+
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
@@ -179,21 +207,74 @@ class TDSConvCTCModule(pl.LightningModule):
         num_features = self.NUM_BANDS * mlp_features[-1]
 
 
-        # ---------- TDS conv encoder (inserted between frontend and transformer) ----------
-        # instantiate TDS conv encoder using provided block_channels and kernel_width args
-        # block_channels and kernel_width are passed into __init__ already
-        self.tds_encoder = TDSConvEncoder(
-            num_features=num_features,
-            block_channels=block_channels,
-            kernel_width=kernel_width,
-        )
+        # # ---------- TDS conv encoder (inserted between frontend and transformer) ----------
+        # # instantiate TDS conv encoder using provided block_channels and kernel_width args
+        # # block_channels and kernel_width are passed into __init__ already
+        # self.tds_encoder = TDSConvEncoder(
+        #     num_features=num_features,
+        #     block_channels=block_channels,
+        #     kernel_width=kernel_width,
+        # )
 
-        # compute how many conv-blocks are applied so we can compute temporal reduction
-        # Each TDSConv2dBlock uses a Conv over time with kernel_size=kernel_width and no padding,
-        # which reduces length by (kernel_width - 1) per block. TDSConvEncoder stacks len(block_channels) blocks.
-        self.tds_num_blocks = len(block_channels)
-        self.tds_time_reduction = self.tds_num_blocks * (kernel_width - 1)
-        # ---------------------------------------------------------------------------------
+        # # compute how many conv-blocks are applied so we can compute temporal reduction
+        # # Each TDSConv2dBlock uses a Conv over time with kernel_size=kernel_width and no padding,
+        # # which reduces length by (kernel_width - 1) per block. TDSConvEncoder stacks len(block_channels) blocks.
+        # self.tds_num_blocks = len(block_channels)
+        # self.tds_time_reduction = self.tds_num_blocks * (kernel_width - 1)
+        # # ---------------------------------------------------------------------------------
+
+
+
+
+
+
+
+
+
+        self.use_tds = use_tds
+        if self.use_tds:
+            self.tds_encoder = TDSConvEncoder(
+                num_features=num_features,
+                block_channels=block_channels,
+                kernel_width=kernel_width,
+            )
+            # compute how many conv-blocks are applied so we can compute temporal reduction
+            # Each TDSConv2dBlock uses a Conv over time with kernel_size=kernel_width and no padding,
+            # which reduces length by (kernel_width - 1) per block. TDSConvEncoder stacks len(block_channels) blocks.
+            self.tds_num_blocks = len(block_channels)
+            self.tds_time_reduction = self.tds_num_blocks * (kernel_width - 1)
+        else:
+            # disabled: use a no-op identity module so call sites don't change
+            self.tds_encoder = IdentityWithLengths()
+            # no temporal shrinkage when TDS is disabled
+            self.tds_num_blocks = 0
+            self.tds_time_reduction = 0
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
         # ---------------- downsampler config (hardcoded) ----------------

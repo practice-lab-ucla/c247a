@@ -15,6 +15,8 @@ import hydra
 import pytorch_lightning as pl
 from hydra.utils import get_original_cwd, instantiate
 from omegaconf import DictConfig, ListConfig, OmegaConf
+import math
+
 
 from emg2qwerty import transforms, utils
 from emg2qwerty.transforms import Transform
@@ -85,6 +87,13 @@ def main(config: DictConfig):
         test_transform=_build_transform(config.transforms.test),
         _convert_="object",
     )
+
+
+
+
+
+
+
 
     # Instantiate callbacks
     callback_configs = config.get("callbacks", [])
