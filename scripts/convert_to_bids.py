@@ -32,7 +32,7 @@ def get_mne_raw(session_path: Path) -> mne.io.Raw:
 
     ch_names = [f"emg{i}" for i in range(16)]
     ch_names = [f"{ch}_left" for ch in ch_names] + [f"{ch}_right" for ch in ch_names]
-    sfreq = 2000.0  # Hz
+    sfreq = 1000.0  # Hz
     data = np.concatenate(
         (session[EMGSessionData.EMG_LEFT], session[EMGSessionData.EMG_RIGHT]), axis=1
     )

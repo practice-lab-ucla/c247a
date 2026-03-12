@@ -197,7 +197,7 @@ class TDSConvCTCModule(pl.LightningModule):
         decoder: DictConfig,
         # transformer: DictConfig,
 
-        use_tds: bool = False, 
+        use_tds: bool = True, 
 
 
     ) -> None:
@@ -279,7 +279,7 @@ class TDSConvCTCModule(pl.LightningModule):
 
         # ---------------- downsampler config (hardcoded) ----------------
         # Hardcode the downsampling behaviour here (no Hydra / YAML)
-        self.downsample = True                  # set False to disable downsampling entirely
+        self.downsample = True                 # set False to disable downsampling entirely
         self.downsample_kernel = 3              # kernel size for Conv1d (set 1 for no receptive-field change)
         self.downsample_stride = 2              # stride >1 downsamples, stride=1 preserves temporal length
         self.downsample_padding = 1             # padding for Conv1d
