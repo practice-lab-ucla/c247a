@@ -1,7 +1,19 @@
 # C147/247 Final Project
 ### Winter 2026 
 
-This course project is built upon the emg2qwerty work from Meta. The first section of this README provides some guidance for working with the repo and contains a running list of FAQs. **Note that the rest of the README is from the original repo and we encourage you to take a look at their work.**
+This course project is built upon the emg2qwerty work from Meta. This repository specifically focuses on our Transformer-based extensions to the original framework. While the original emg2qwerty implementation centers around CNN-based (TDSConv + CTC) architectures, our work investigates whether self-attention mechanisms can better model long-range temporal dependencies in sEMG signals for keystroke decoding.
+
+In this repo, we implement:
+
+A Transformer-only encoder model with positional encoding,
+
+Temporal downsampling using 1D convolution before self-attention to reduce sequence length and computational cost,
+
+A hybrid TDSConv + Transformer architecture that combines convolutional local feature extraction with global self-attention layers.
+
+These modifications allow us to analyze how attention-based sequence models perform relative to convolutional baselines under the same CTC training setup.
+
+The first section of this README provides some guidance for working with the repo and contains a running list of FAQs. **Note that the rest of the README is from the original repo.**
 
 ## Guiding Tips + FAQs
 _Last updated 2/13/2025_
