@@ -15,8 +15,6 @@ import hydra
 import pytorch_lightning as pl
 from hydra.utils import get_original_cwd, instantiate
 from omegaconf import DictConfig, ListConfig, OmegaConf
-import math
-
 
 from emg2qwerty import transforms, utils
 from emg2qwerty.transforms import Transform
@@ -65,6 +63,17 @@ def main(config: DictConfig):
         _recursive_=False,
     )
     if config.checkpoint is not None:
+        # --- THE MONKEY PATCH ---
+        import torch
+        _original_load = torch.load
+        
+        def _patched_load(*args, **kwargs):
+            kwargs['weights_only'] = False
+            return _original_load(*args, **kwargs)
+            
+        torch.load = _patched_load  # Temporarily override torch.load
+        # ------------------------
+
         log.info(f"Loading module from checkpoint {config.checkpoint}")
         module = module.load_from_checkpoint(
             config.checkpoint,
@@ -88,13 +97,6 @@ def main(config: DictConfig):
         _convert_="object",
     )
 
-
-
-
-
-
-
-
     # Instantiate callbacks
     callback_configs = config.get("callbacks", [])
     callbacks = [instantiate(cfg) for cfg in callback_configs]
@@ -114,6 +116,16 @@ def main(config: DictConfig):
 
         # Train
         trainer.fit(module, datamodule, ckpt_path=resume_from_checkpoint)
+        # --- THE MONKEY PATCH ---
+        import torch
+        _original_load = torch.load
+        
+        def _patched_load(*args, **kwargs):
+            kwargs['weights_only'] = False
+            return _original_load(*args, **kwargs)
+            
+        torch.load = _patched_load  # Temporarily override torch.load
+        # ------------------------
 
         # Load best checkpoint
         module = module.load_from_checkpoint(

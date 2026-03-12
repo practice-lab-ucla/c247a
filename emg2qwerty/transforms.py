@@ -155,6 +155,81 @@ class TemporalAlignmentJitter:
 
 
 @dataclass
+class AdditiveGaussianNoise:
+    """Applies additive Gaussian white noise to the raw EMG signal.
+    The noise variance is scaled relative to the standard deviation 
+    of the input signal to ensure it doesn't overpower quiet muscle movements.
+
+    Args:
+        scale (float): The fraction of the signal's standard deviation 
+            to use as the noise standard deviation. (default: 0.05 for 5%)
+        p (float): The probability that this augmentation is applied 
+            to a given tensor. (default: 0.5)
+    """
+
+    scale: float = 0.05
+    p: float = 0.5
+
+    def __call__(self, tensor: torch.Tensor) -> torch.Tensor:
+        # Only apply the noise p% of the time
+        if np.random.random() > self.p:
+            return tensor
+            
+        # Calculate the standard deviation per channel to scale the noise accurately
+        # Assumes tensor shape is (T, ..., C) where 0 is time
+        std = tensor.std(dim=0, keepdim=True)
+        
+        # Generate Gaussian noise with the same shape as the input
+        noise = torch.randn_like(tensor) * std * self.scale
+        
+        return tensor + noise
+
+@dataclass
+class AmplitudeScaling:
+    """Randomly scales the amplitude of the EMG signal to simulate 
+    harder or softer keystrokes.
+    """
+    min_scale: float = 0.7
+    max_scale: float = 1.3
+    p: float = 0.5
+
+    def __call__(self, tensor: torch.Tensor) -> torch.Tensor:
+        if np.random.random() > self.p:
+            return tensor
+            
+        # Draw a random scaling factor
+        scale = np.random.uniform(self.min_scale, self.max_scale)
+        return tensor * scale
+
+
+@dataclass
+class RandomChannelDropout:
+    """Randomly zeroes out an entire electrode channel for a batch 
+    to force the model to learn from secondary muscles.
+    """
+    p: float = 0.5
+    channel_dim: int = -1
+
+    def __call__(self, tensor: torch.Tensor) -> torch.Tensor:
+        if np.random.random() > self.p:
+            return tensor
+            
+        # Clone to avoid in-place modification issues
+        tensor_out = tensor.clone()
+        
+        # Select a random channel index to drop
+        num_channels = tensor_out.shape[self.channel_dim]
+        drop_idx = np.random.randint(0, num_channels)
+        
+        # Zero out the selected channel
+        if self.channel_dim == -1:
+            tensor_out[..., drop_idx] = 0.0
+        elif self.channel_dim == 1:
+            tensor_out[:, drop_idx, ...] = 0.0
+            
+        return tensor_out
+
+@dataclass
 class LogSpectrogram:
     """Creates log10-scaled spectrogram from an EMG signal. In the case of
     multi-channeled signal, the channels are treated independently.
