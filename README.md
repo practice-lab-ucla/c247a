@@ -1,9 +1,17 @@
 # C147/247 Final Project
 ### Winter 2026 
 
-This course project is built upon the emg2qwerty work from Meta. This repository specifically focuses on our Transformer-based extensions to the original framework. While the original emg2qwerty implementation centers around CNN-based (TDSConv + CTC) architectures, our work investigates whether self-attention mechanisms can better model long-range temporal dependencies in sEMG signals for keystroke decoding.
+This course project is built upon the emg2qwerty work from Meta. While the original emg2qwerty implementation centers around CNN-based (TDSConv + CTC) architectures, our work extends the framework with additional sequence modeling approaches to better capture temporal dependencies in sEMG signals for keystroke decoding.
 
-In this repo, we implement:
+Our project was developed across two branches:
+
+LSTM branch — explores recurrent neural networks with multi-layer LSTM encoders to explicitly model sequential muscle activation dynamics.
+
+Transformer branch — investigates self-attention-based architectures for modeling long-range temporal dependencies.
+
+Across these branches, we implement:
+
+An LSTM-based encoder trained with CTC loss,
 
 A Transformer-only encoder model with positional encoding,
 
@@ -11,7 +19,7 @@ Temporal downsampling using 1D convolution before self-attention to reduce seque
 
 A hybrid TDSConv + Transformer architecture that combines convolutional local feature extraction with global self-attention layers.
 
-These modifications allow us to analyze how attention-based sequence models perform relative to convolutional baselines under the same CTC training setup.
+These extensions allow us to systematically compare convolutional, recurrent, and attention-based sequence models under the same training and evaluation setup, and to analyze how architectural inductive bias affects EMG-to-text transcription performance.
 
 The first section of this README provides some guidance for working with the repo and contains a running list of FAQs. **Note that the rest of the README is from the original repo.**
 
